@@ -1,17 +1,17 @@
-digraph LlqSession {
+digraph ClientSession {
 
     node
         [shape=Mrecord width=1.5];
 
-    subgraph cluster_LlqSessionFSM {
+    subgraph cluster_ClientSessionFSM {
 
-        label="LlqSessionFSM";
+        label="ClientSessionFSM";
 
         //
         // States (Nodes)
         //
 
-        "LlqSessionFSM::Initial"
+        "ClientSessionFSM::Initial"
             [label="{Initial}"];
 
         "%start"
@@ -21,7 +21,7 @@ digraph LlqSession {
         // Transitions (Edges)
         //
 
-        "%start" -> "LlqSessionFSM::Initial"
+        "%start" -> "ClientSessionFSM::Initial"
     }
 
 }

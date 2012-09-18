@@ -23,28 +23,38 @@
 
 // The FSM for managing the long lived query clients
 
-%class LlqSession
+%class ClientSession
 %package com.hellblazer.dnsextd
 %access public  
 
-%start LlqSessionFSM::Initial
-%map LlqSessionFSM
+%start ClientSessionFSM::Initial
+%map ClientSessionFSM
 %%
 Initial
 {
     accept
     nil {
     }
+    
     readReady
     nil {
     }
+    
     writeReady
+    nil {
+    }
+    
+    processMessage
     nil {
     }
 }
 
 Default {
     closing
+    nil {
+    }
+    
+    close
     nil {
     }
 }

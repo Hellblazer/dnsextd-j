@@ -1,12 +1,12 @@
 <html>
   <head>
-    <title>LlqSession</title>
+    <title>ClientSession</title>
   </head>
 
   <body>
     <table align=center border=3 cellspacing=2 cellpadding=2>
       <caption align="top">
-        LlqSessionFSM Finite State Machine
+        ClientSessionFSM Finite State Machine
       </caption>
       <tr>
         <th rowspan=2>
@@ -15,7 +15,7 @@
         <th colspan=2>
           Actions
         </th>
-        <th colspan=5>
+        <th colspan=7>
           Transition
         </th>
       </tr>
@@ -30,7 +30,13 @@
           accept
         </th>
         <th>
+          close
+        </th>
+        <th>
           closing
+        </th>
+        <th>
+          processMessage
         </th>
         <th>
           readReady
@@ -57,6 +63,14 @@
           </pre>
         </td>
         <td>
+        </td>
+        <td>
+        </td>
+        <td>
+          <pre>
+  Initial
+  {}
+          </pre>
         </td>
         <td>
           <pre>

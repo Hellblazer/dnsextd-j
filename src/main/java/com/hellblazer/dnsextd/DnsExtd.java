@@ -17,18 +17,12 @@
 package com.hellblazer.dnsextd;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.channels.SocketChannel;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.hellblazer.pinkie.CommunicationsHandler;
-import com.hellblazer.pinkie.CommunicationsHandlerFactory;
 import com.hellblazer.pinkie.ServerSocketChannelHandler;
-import com.hellblazer.pinkie.SocketOptions;
 
 /**
  * A daemon process which provides extension functionality for <a
@@ -46,21 +40,8 @@ public class DnsExtd {
     private final ServerSocketChannelHandler handler;
     private final AtomicBoolean              running = new AtomicBoolean();
 
-    public DnsExtd(InetSocketAddress address, SocketOptions socketOptions,
-                   ExecutorService commsExec) throws IOException {
-
-        handler = new ServerSocketChannelHandler(
-                                                 "DNS EXTD Daemon",
-                                                 socketOptions,
-                                                 address,
-                                                 commsExec,
-                                                 new CommunicationsHandlerFactory() {
-                                                     @Override
-                                                     public CommunicationsHandler createCommunicationsHandler(SocketChannel channel) {
-                                                         return new LlqSession();
-                                                     }
-
-                                                 });
+    public DnsExtd(ServerSocketChannelHandler handler) throws IOException {
+        this.handler = handler;
     }
 
     public void start() {
