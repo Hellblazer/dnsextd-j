@@ -20,6 +20,7 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -52,6 +53,7 @@ import org.xbill.DNS.Zone;
 
 import com.hellblazer.dnsextd.util.ByteBufferPool;
 import com.hellblazer.pinkie.CommunicationsHandler;
+import com.hellblazer.pinkie.CommunicationsHandlerFactory;
 import com.hellblazer.pinkie.ServerSocketChannelHandler;
 import com.hellblazer.pinkie.SocketChannelHandler;
 
@@ -65,7 +67,6 @@ import com.hellblazer.pinkie.SocketChannelHandler;
  * 
  */
 public class DnsExtd {
-    @SuppressWarnings("unused")
     private class ClientSessionImpl implements CommunicationsHandler,
             ClientSession {
 
@@ -197,6 +198,7 @@ public class DnsExtd {
     private final static int                 FLAG_DNSSECOK = 1;
     private final static int                 FLAG_SIGONLY  = 2;
     private final static Logger              log           = LoggerFactory.getLogger(DnsExtd.class);
+
     private final Map<Integer, Cache>        caches        = new HashMap<Integer, Cache>();
     private final ServerSocketChannelHandler handler;
     private final ByteBufferPool             pool;
@@ -208,6 +210,12 @@ public class DnsExtd {
                                                                            throws IOException {
         this.handler = handler;
         this.pool = pool;
+        this.handler.setEventHandlerFactory(new CommunicationsHandlerFactory() {
+            @Override
+            public CommunicationsHandler createCommunicationsHandler(SocketChannel channel) {
+                return new ClientSessionImpl();
+            }
+        });
     }
 
     public void start() {
@@ -403,7 +411,8 @@ public class DnsExtd {
         Zone zone = znames.get(name);
         boolean first = true;
         if (zone == null) {
-            return errorMessage(query, Rcode.REFUSED);
+            return buildErrorMessage(query.getHeader(), Rcode.REFUSED,
+                                     query.getQuestion());
         }
         Iterator<?> it = zone.AXFR();
         try {
@@ -428,17 +437,14 @@ public class DnsExtd {
                 dataOut.write(out);
             }
         } catch (IOException ex) {
-            System.out.println("AXFR failed");
-        }
-        try {
-            s.close();
-        } catch (IOException ex) {
+            log.warn("AXFR failed", ex);
+        } finally {
+            try {
+                s.close();
+            } catch (IOException ex) {
+            }
         }
         return null;
-    }
-
-    private byte[] errorMessage(Message query, int rcode) {
-        return buildErrorMessage(query.getHeader(), rcode, query.getQuestion());
     }
 
     private Zone findBestZone(Name name) {
@@ -491,22 +497,10 @@ public class DnsExtd {
     @SuppressWarnings("unused")
     private byte[] generateReply(Message query, byte[] in, int length, Socket s)
                                                                                 throws IOException {
-        Header header;
-        int maxLength;
-        int flags = 0;
-
-        header = query.getHeader();
-        if (header.getFlag(Flags.QR)) {
-            return null;
+        byte[] error = validateHeader(query);
+        if (error != null) {
+            return error;
         }
-        if (header.getRcode() != Rcode.NOERROR) {
-            return errorMessage(query, Rcode.FORMERR);
-        }
-        if (header.getOpcode() != Opcode.QUERY) {
-            return errorMessage(query, Rcode.NOTIMP);
-        }
-
-        Record queryRecord = query.getQuestion();
 
         TSIGRecord queryTSIG = query.getTSIG();
         TSIG tsig = null;
@@ -522,6 +516,8 @@ public class DnsExtd {
         if (queryOPT != null && queryOPT.getVersion() > 0) {
         }
 
+        int maxLength;
+        int flags = 0;
         if (s != null) {
             maxLength = 65535;
         } else if (queryOPT != null) {
@@ -539,6 +535,8 @@ public class DnsExtd {
         if (query.getHeader().getFlag(Flags.RD)) {
             response.getHeader().setFlag(Flags.RD);
         }
+
+        Record queryRecord = query.getQuestion();
         response.addRecord(queryRecord, Section.QUESTION);
 
         Name name = queryRecord.getName();
@@ -548,12 +546,14 @@ public class DnsExtd {
             return doAXFR(name, query, tsig, queryTSIG, s);
         }
         if (!Type.isRR(type) && type != Type.ANY) {
-            return errorMessage(query, Rcode.NOTIMP);
+            return buildErrorMessage(query.getHeader(), Rcode.NOTIMP,
+                                     query.getQuestion());
         }
 
         byte rcode = addAnswer(response, name, type, dclass, 0, flags);
         if (rcode != Rcode.NOERROR && rcode != Rcode.NXDOMAIN) {
-            return errorMessage(query, rcode);
+            return buildErrorMessage(query.getHeader(), rcode,
+                                     query.getQuestion());
         }
 
         addAdditional(response, flags);
@@ -576,5 +576,25 @@ public class DnsExtd {
             caches.put(new Integer(dclass), c);
         }
         return c;
+    }
+
+    /**
+     * @param query
+     * @return the response message if invalid query header, or null if the
+     *         query is valid
+     */
+    protected byte[] validateHeader(Message query) {
+        Header header = query.getHeader();
+        if (!header.getFlag(Flags.QR)) {
+            if (header.getRcode() != Rcode.NOERROR) {
+                return buildErrorMessage(query.getHeader(), Rcode.FORMERR,
+                                         query.getQuestion());
+            }
+            if (header.getOpcode() != Opcode.QUERY) {
+                return buildErrorMessage(query.getHeader(), Rcode.NOTIMP,
+                                         query.getQuestion());
+            }
+        }
+        return null;
     }
 }
