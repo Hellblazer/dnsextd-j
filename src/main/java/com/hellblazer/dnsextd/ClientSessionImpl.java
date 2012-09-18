@@ -23,7 +23,6 @@ import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,177 +51,152 @@ import org.xbill.DNS.Zone;
 
 import com.hellblazer.dnsextd.util.ByteBufferPool;
 import com.hellblazer.pinkie.CommunicationsHandler;
-import com.hellblazer.pinkie.ServerSocketChannelHandler;
 import com.hellblazer.pinkie.SocketChannelHandler;
 
 /**
- * A daemon process which provides extension functionality for <a
- * href="files.dns-sd.org/draft-sekar-dns-llq.txt">DNS long lived queries</a>
- * and <a href="files.dns-sd.org/draft-sekar-dns-ul.txt">Dynamic DNS update
- * lease</a> for DNS Service Discovery clients.
+ * A DNS long lived query client session
  * 
  * @author hhildebrand
  * 
  */
-public class DnsExtd {
-    @SuppressWarnings("unused")
-    private class ClientSessionImpl implements CommunicationsHandler,
-            ClientSession {
+public class ClientSessionImpl implements CommunicationsHandler, ClientSession {
+    private final static int           FLAG_DNSSECOK = 1;
+    private final static int           FLAG_SIGONLY  = 2;
+    private final static Logger        log           = LoggerFactory.getLogger(ClientSessionImpl.class);
 
-        private ByteBuffer                 buffer;
-        private final ClientSessionContext fsm     = new ClientSessionContext(
-                                                                              this);
-        private SocketChannelHandler       handler;
-        private boolean                    inError = false;
+    private ByteBuffer                 buffer;
+    private final Map<Integer, Cache>  caches        = new HashMap<Integer, Cache>();
+    private final ClientSessionContext fsm           = new ClientSessionContext(
+                                                                                this);
+    private SocketChannelHandler       handler;
+    private boolean                    inError       = false;
+    private final ByteBufferPool       pool;
+    private final Map<Name, TSIG>      tsigs         = new HashMap<Name, TSIG>();
+    private final Map<Name, Zone>      znames        = new HashMap<Name, Zone>();
 
-        /* (non-Javadoc)
-         * @see com.hellblazer.pinkie.CommunicationsHandler#accept(com.hellblazer.pinkie.SocketChannelHandler)
-         */
-        @Override
-        public void accept(SocketChannelHandler handler) {
-            this.handler = handler;
-            fsm.accept();
-        }
-
-        /* (non-Javadoc)
-         * @see com.hellblazer.pinkie.CommunicationsHandler#closing()
-         */
-        @Override
-        public void closing() {
-            fsm.closing();
-        }
-
-        /* (non-Javadoc)
-         * @see com.hellblazer.pinkie.CommunicationsHandler#connect(com.hellblazer.pinkie.SocketChannelHandler)
-         */
-        @Override
-        public void connect(SocketChannelHandler handler) {
-            throw new UnsupportedOperationException(
-                                                    "Outbound connections not supported");
-        }
-
-        /* (non-Javadoc)
-         * @see com.hellblazer.dnsextd.ClientSession#isInError()
-         */
-        @Override
-        public boolean isInError() {
-            return inError;
-        }
-
-        /* (non-Javadoc)
-         * @see com.hellblazer.dnsextd.ClientSession#nextMessage()
-         */
-        @Override
-        public void nextMessage() {
-            buffer = pool.allocate(4);
-            try {
-                int read = handler.getChannel().read(buffer);
-                if (read < 0) {
-                    inError = true;
-                    return;
-                }
-            } catch (IOException e) {
-                log.error("Error accepting socket", e);
-                return;
-            }
-            ByteBuffer header = buffer;
-            buffer = pool.allocate(header.getInt());
-            pool.free(header);
-            if (readMessage()) {
-                fsm.processMessage();
-            } else {
-                if (inError) {
-                    fsm.close();
-                } else {
-                    handler.selectForRead();
-                }
-            }
-        }
-
-        /* (non-Javadoc)
-         * @see com.hellblazer.dnsextd.ClientSession#readMessage()
-         */
-        @Override
-        public boolean readMessage() {
-            int read;
-            try {
-                read = handler.getChannel().read(buffer);
-            } catch (IOException e) {
-                log.error(String.format("Error reading message from client %s",
-                                        handler.getChannel()), e);
-                inError = true;
-                return false;
-            }
-            if (read < 0) {
-                inError = true;
-                return false;
-            }
-
-            return buffer.hasRemaining();
-        }
-
-        /* (non-Javadoc)
-         * @see com.hellblazer.pinkie.CommunicationsHandler#readReady()
-         */
-        @Override
-        public void readReady() {
-            fsm.readReady();
-        }
-
-        /* (non-Javadoc)
-         * @see com.hellblazer.dnsextd.ClientSession#selectForRead()
-         */
-        @Override
-        public void selectForRead() {
-            handler.selectForRead();
-        }
-
-        /* (non-Javadoc)
-         * @see com.hellblazer.dnsextd.ClientSession#selectForWrite()
-         */
-        @Override
-        public void selectForWrite() {
-            handler.selectForWrite();
-        }
-
-        /* (non-Javadoc)
-         * @see com.hellblazer.pinkie.CommunicationsHandler#writeReady()
-         */
-        @Override
-        public void writeReady() {
-            fsm.writeReady();
-        }
-    }
-
-    private final static int                 FLAG_DNSSECOK = 1;
-    private final static int                 FLAG_SIGONLY  = 2;
-    private final static Logger              log           = LoggerFactory.getLogger(DnsExtd.class);
-    private final Map<Integer, Cache>        caches        = new HashMap<Integer, Cache>();
-    private final ServerSocketChannelHandler handler;
-    private final ByteBufferPool             pool;
-    private final AtomicBoolean              running       = new AtomicBoolean();
-    private final Map<Name, TSIG>            tsigs         = new HashMap<Name, TSIG>();
-    private final Map<Name, Zone>            znames        = new HashMap<Name, Zone>();
-
-    public DnsExtd(ServerSocketChannelHandler handler, ByteBufferPool pool)
-                                                                           throws IOException {
-        this.handler = handler;
+    public ClientSessionImpl(ByteBufferPool pool) {
         this.pool = pool;
     }
 
-    public void start() {
-        if (running.compareAndSet(false, true)) {
-            handler.start();
+    /* (non-Javadoc)
+     * @see com.hellblazer.pinkie.CommunicationsHandler#accept(com.hellblazer.pinkie.SocketChannelHandler)
+     */
+    @Override
+    public void accept(SocketChannelHandler handler) {
+        this.handler = handler;
+        fsm.accept();
+    }
+
+    /* (non-Javadoc)
+     * @see com.hellblazer.pinkie.CommunicationsHandler#closing()
+     */
+    @Override
+    public void closing() {
+        fsm.closing();
+    }
+
+    /* (non-Javadoc)
+     * @see com.hellblazer.pinkie.CommunicationsHandler#connect(com.hellblazer.pinkie.SocketChannelHandler)
+     */
+    @Override
+    public void connect(SocketChannelHandler handler) {
+        throw new UnsupportedOperationException(
+                                                "Outbound connections not supported");
+    }
+
+    /* (non-Javadoc)
+     * @see com.hellblazer.dnsextd.ClientSession#isInError()
+     */
+    @Override
+    public boolean isInError() {
+        return inError;
+    }
+
+    /* (non-Javadoc)
+     * @see com.hellblazer.dnsextd.ClientSession#nextMessage()
+     */
+    @Override
+    public void nextMessage() {
+        buffer = pool.allocate(4);
+        try {
+            int read = handler.getChannel().read(buffer);
+            if (read < 0) {
+                inError = true;
+                return;
+            }
+        } catch (IOException e) {
+            log.error("Error accepting socket", e);
+            return;
+        }
+        ByteBuffer header = buffer;
+        buffer = pool.allocate(header.getInt());
+        pool.free(header);
+        if (readMessage()) {
+            fsm.processMessage();
+        } else {
+            if (inError) {
+                fsm.close();
+            } else {
+                handler.selectForRead();
+            }
         }
     }
 
-    public void terminate() {
-        if (running.compareAndSet(true, false)) {
-            handler.terminate();
+    /* (non-Javadoc)
+     * @see com.hellblazer.dnsextd.ClientSession#readMessage()
+     */
+    @Override
+    public boolean readMessage() {
+        int read;
+        try {
+            read = handler.getChannel().read(buffer);
+        } catch (IOException e) {
+            log.error(String.format("Error reading message from client %s",
+                                    handler.getChannel()), e);
+            inError = true;
+            return false;
         }
+        if (read < 0) {
+            inError = true;
+            return false;
+        }
+
+        return buffer.hasRemaining();
     }
 
-    private void addAdditional(Message response, int flags) {
+    /* (non-Javadoc)
+     * @see com.hellblazer.pinkie.CommunicationsHandler#readReady()
+     */
+    @Override
+    public void readReady() {
+        fsm.readReady();
+    }
+
+    /* (non-Javadoc)
+     * @see com.hellblazer.dnsextd.ClientSession#selectForRead()
+     */
+    @Override
+    public void selectForRead() {
+        handler.selectForRead();
+    }
+
+    /* (non-Javadoc)
+     * @see com.hellblazer.dnsextd.ClientSession#selectForWrite()
+     */
+    @Override
+    public void selectForWrite() {
+        handler.selectForWrite();
+    }
+
+    /* (non-Javadoc)
+     * @see com.hellblazer.pinkie.CommunicationsHandler#writeReady()
+     */
+    @Override
+    public void writeReady() {
+        fsm.writeReady();
+    }
+
+    private final void addAdditional(Message response, int flags) {
         addAdditional2(response, Section.ANSWER, flags);
         addAdditional2(response, Section.AUTHORITY, flags);
     }
@@ -325,7 +299,7 @@ public class DnsExtd {
         return rcode;
     }
 
-    private void addCacheNS(Message response, Cache cache, Name name) {
+    private final void addCacheNS(Message response, Cache cache, Name name) {
         SetResponse sr = cache.lookupRecords(name, Type.NS, Credibility.HINT);
         if (!sr.isDelegation()) {
             return;
@@ -346,7 +320,7 @@ public class DnsExtd {
         addRRset(name, response, a, Section.ADDITIONAL, flags);
     }
 
-    private void addNS(Message response, Zone zone, int flags) {
+    private final void addNS(Message response, Zone zone, int flags) {
         RRset nsRecords = zone.getNS();
         addRRset(nsRecords.getName(), response, nsRecords, Section.AUTHORITY,
                  flags);
@@ -381,7 +355,7 @@ public class DnsExtd {
         }
     }
 
-    private void addSOA(Message response, Zone zone) {
+    private final void addSOA(Message response, Zone zone) {
         response.addRecord(zone.getSOA(), Section.AUTHORITY);
     }
 
