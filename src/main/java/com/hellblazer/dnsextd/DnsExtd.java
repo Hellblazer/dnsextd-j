@@ -20,8 +20,6 @@ import java.io.IOException;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -35,6 +33,8 @@ import org.xbill.DNS.Cache;
 import org.xbill.DNS.Credibility;
 import org.xbill.DNS.DClass;
 import org.xbill.DNS.DNAMERecord;
+import org.xbill.DNS.EDNSOption;
+import org.xbill.DNS.EDNSOption.Code;
 import org.xbill.DNS.ExtendedFlags;
 import org.xbill.DNS.Flags;
 import org.xbill.DNS.Header;
@@ -51,6 +51,7 @@ import org.xbill.DNS.SetResponse;
 import org.xbill.DNS.TSIG;
 import org.xbill.DNS.TSIGRecord;
 import org.xbill.DNS.Type;
+import org.xbill.DNS.UpdateLeaseOption;
 import org.xbill.DNS.Zone;
 
 import com.hellblazer.dnsextd.util.ByteBufferPool;
@@ -77,7 +78,6 @@ public class DnsExtd {
                                                                               this);
         private SocketChannelHandler       handler;
         private boolean                    inError = false;
-        private Message                    query;
 
         /* (non-Javadoc)
          * @see com.hellblazer.pinkie.CommunicationsHandler#accept(com.hellblazer.pinkie.SocketChannelHandler)
@@ -114,16 +114,38 @@ public class DnsExtd {
         }
 
         @Override
-        public void processMessage() {
+        public void processMessage(Message query, byte[] bytes) {
             OPTRecord queryOPT = query.getOPT();
-            if (queryOPT != null && queryOPT.getVersion() > 0) {
+            if (queryOPT == null || queryOPT.getVersion() != 0) {
+                fsm.processed();
+                return;
+            }
+            List<EDNSOption> leases = queryOPT.getOptions(Code.UPDATE_LEASE);
+            if (leases.isEmpty()) {
+                fsm.passThrough(query);
+            }
+            if (leases.size() > 1) {
+                log.info(String.format("Received %s update lease records",
+                                       leases.size()));
+                fsm.respond(formatError(query));
+                return;
             }
 
-            int flags = 0;
-            if (queryOPT != null
-                && (queryOPT.getFlags() & ExtendedFlags.DO) != 0) {
-                flags = FLAG_DNSSECOK;
+            // We have an update lease query
+            UpdateLeaseOption updateLease = (UpdateLeaseOption) leases.get(0);
+
+            TSIGRecord queryTSIG = query.getTSIG();
+            TSIG tsig = null;
+            if (queryTSIG != null) {
+                tsig = tsigs.get(queryTSIG.getName());
+                if (tsig == null
+                    || tsig.verify(query, bytes, bytes.length, null) != Rcode.NOERROR) {
+                    fsm.respond(buildErrorMessage(query.getHeader().clone(),
+                                                  Rcode.NOTAUTH, null));
+                    return;
+                }
             }
+            List<Record> updates = query.getSectionList(Section.UPDATE);
         }
 
         /* (non-Javadoc)
@@ -146,7 +168,20 @@ public class DnsExtd {
             buffer = pool.allocate(header.getInt());
             pool.free(header);
             if (readMessage()) {
-                fsm.processMessage();
+                buffer.flip();
+                Message message;
+                byte[] bytes = new byte[buffer.remaining()];
+                buffer.get(bytes);
+                try {
+                    message = new Message(bytes);
+                } catch (IOException e) {
+                    log.error(String.format("Error parsing message", e));
+                    inError = true;
+                    return;
+                }
+                pool.free(buffer);
+                buffer = null;
+                fsm.process(message, bytes);
             } else {
                 if (inError) {
                     fsm.close();
@@ -215,6 +250,7 @@ public class DnsExtd {
     private final static int                 FLAG_SIGONLY  = 2;
     private final static Logger              log           = LoggerFactory.getLogger(DnsExtd.class);
 
+    private final List<?>                    leases        = null;
     private final Map<Integer, Cache>        caches        = new HashMap<Integer, Cache>();
     private final ServerSocketChannelHandler handler;
     private final ByteBufferPool             pool;
@@ -387,8 +423,7 @@ public class DnsExtd {
         response.addRecord(zone.getSOA(), Section.AUTHORITY);
     }
 
-    private List<Message> buildErrorMessage(Header header, int rcode,
-                                            Record question) {
+    private Message buildErrorMessage(Header header, int rcode, Record question) {
         Message response = new Message();
         response.setHeader(header);
         for (int i = 0; i < 4; i++) {
@@ -398,36 +433,7 @@ public class DnsExtd {
             response.addRecord(question, Section.QUESTION);
         }
         header.setRcode(rcode);
-        return Arrays.asList(response);
-    }
-
-    private List<Message> doAXFR(Name name, Message query, TSIG tsig,
-                                 TSIGRecord qtsig) {
-        Zone zone = znames.get(name);
-        boolean first = true;
-        List<Message> responses = new ArrayList<>();
-        if (zone == null) {
-            return buildErrorMessage(query.getHeader(), Rcode.REFUSED,
-                                     query.getQuestion());
-        }
-
-        int id = query.getHeader().getID();
-        for (Iterator<?> it = zone.AXFR(); it.hasNext();) {
-            RRset rrset = (RRset) it.next();
-            Message response = new Message(id);
-            Header header = response.getHeader();
-            header.setFlag(Flags.QR);
-            header.setFlag(Flags.AA);
-            addRRset(rrset.getName(), response, rrset, Section.ANSWER,
-                     FLAG_DNSSECOK);
-            if (tsig != null) {
-                tsig.applyStream(response, qtsig, first);
-                qtsig = response.getTSIG();
-            }
-            first = false;
-            responses.add(response);
-        }
-        return responses;
+        return response;
     }
 
     private Zone findBestZone(Name name) {
@@ -467,7 +473,11 @@ public class DnsExtd {
         }
     }
 
-    private List<Message> formerrMessage(byte[] in) {
+    private Message formatError(Message in) {
+        return buildErrorMessage(in.getHeader().clone(), Rcode.FORMERR, null);
+    }
+
+    private Message formatError(byte[] in) {
         Header header;
         try {
             header = new Header(in);
@@ -478,9 +488,9 @@ public class DnsExtd {
     }
 
     @SuppressWarnings("unused")
-    private List<Message> generateReply(Message query, byte[] in, int length,
-                                        Socket s) throws IOException {
-        List<Message> error = validateHeader(query);
+    private Message generateReply(Message query, byte[] in, int length, Socket s)
+                                                                                 throws IOException {
+        Message error = validateHeader(query);
         if (error != null) {
             return error;
         }
@@ -491,7 +501,7 @@ public class DnsExtd {
             tsig = tsigs.get(queryTSIG.getName());
             if (tsig == null
                 || tsig.verify(query, in, length, null) != Rcode.NOERROR) {
-                return formerrMessage(in);
+                return formatError(in);
             }
         }
 
@@ -514,9 +524,6 @@ public class DnsExtd {
         Record queryRecord = query.getQuestion();
         response.addRecord(queryRecord, Section.QUESTION);
 
-        if (queryRecord.getType() == Type.AXFR && s != null) {
-            return doAXFR(queryRecord.getName(), query, tsig, queryTSIG);
-        }
         if (!Type.isRR(queryRecord.getType())
             && queryRecord.getType() != Type.ANY) {
             return buildErrorMessage(query.getHeader(), Rcode.NOTIMP,
@@ -551,7 +558,7 @@ public class DnsExtd {
             response.addRecord(opt, Section.ADDITIONAL);
         }
 
-        return Arrays.asList(response);
+        return response;
     }
 
     private Cache getCache(int dclass) {
@@ -568,7 +575,7 @@ public class DnsExtd {
      * @return the response message if invalid query header, or null if the
      *         query is valid
      */
-    protected List<Message> validateHeader(Message query) {
+    protected Message validateHeader(Message query) {
         Header header = query.getHeader();
         if (!header.getFlag(Flags.QR)) {
             if (header.getRcode() != Rcode.NOERROR) {

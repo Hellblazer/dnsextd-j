@@ -1,4 +1,3 @@
-%{
 /** 
  * (C) Copyright 2012 Hal Hildebrand, all rights reserved.
  * This library is free software; you can redistribute it and/or
@@ -16,59 +15,45 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+package com.hellblazer.dnsextd;
+
+import java.util.List;
+import java.util.concurrent.ScheduledFuture;
+
+import org.xbill.DNS.Record;
+
 /**
  * @author hhildebrand
+ * 
  */
-%}
+public class Lease {
+    private final long         duration;
+    private final List<Record> updates;
+    private ScheduledFuture<?> watchdog;
 
-// The FSM for managing the long lived query clients
+    /**
+     * @param duration
+     * @param updates
+     */
+    public Lease(long duration, List<Record> updates) {
+        super();
+        this.duration = duration;
+        this.updates = updates;
+    }
 
-%class ClientSession
-%package com.hellblazer.dnsextd
-%access public
-%import org.xbill.DNS.Message
+    public long getDuration() {
+        return duration;
+    }
 
-%start ClientSessionFSM::Initial
-%map ClientSessionFSM
-%%
-Initial
-{
-    accept
-    nil {
+    public List<Record> getUpdates() {
+        return updates;
     }
-    
-    readReady
-    nil {
+
+    public ScheduledFuture<?> getWatchdog() {
+        return watchdog;
     }
-    
-    writeReady
-    nil {
-    }
-    
-    process(message: Message, bytes: byte[])
-    nil {
-    }
-    
-    respond(message: Message)
-    nil {
-    }
-    
-    processed
-    nil {
-    }
-    
-    passThrough(message: Message)
-    nil {
+
+    public void setWatchdog(ScheduledFuture<?> watchdog) {
+        this.watchdog = watchdog;
     }
 }
-
-Default {
-    closing
-    nil {
-    }
-    
-    close
-    nil {
-    }
-}
-%%

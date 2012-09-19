@@ -16,6 +16,8 @@
  */
 package com.hellblazer.dnsextd;
 
+import org.xbill.DNS.Message;
+
 /**
  * @author hhildebrand
  * 
@@ -26,7 +28,7 @@ public interface ClientSession {
 
     void nextMessage();
 
-    void processMessage();
+    void processMessage(Message query, byte[] bytes);
 
     boolean readMessage();
 
