@@ -18,21 +18,20 @@ package com.hellblazer.dnsextd;
 
 /**
  * @author hhildebrand
- *
+ * 
  */
 public interface ClientSession {
 
-    public abstract boolean isInError();
+    boolean isInError();
 
-    public abstract void nextMessage();
+    void nextMessage();
 
-    /**
-     * @return
-     */
-    public abstract boolean readMessage();
+    void processMessage();
 
-    public abstract void selectForRead();
+    boolean readMessage();
 
-    public abstract void selectForWrite();
+    void selectForRead();
+
+    void selectForWrite();
 
 }

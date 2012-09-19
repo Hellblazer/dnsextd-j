@@ -16,13 +16,15 @@
  */
 package com.hellblazer.dnsextd;
 
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -75,6 +77,7 @@ public class DnsExtd {
                                                                               this);
         private SocketChannelHandler       handler;
         private boolean                    inError = false;
+        private Message                    query;
 
         /* (non-Javadoc)
          * @see com.hellblazer.pinkie.CommunicationsHandler#accept(com.hellblazer.pinkie.SocketChannelHandler)
@@ -108,6 +111,19 @@ public class DnsExtd {
         @Override
         public boolean isInError() {
             return inError;
+        }
+
+        @Override
+        public void processMessage() {
+            OPTRecord queryOPT = query.getOPT();
+            if (queryOPT != null && queryOPT.getVersion() > 0) {
+            }
+
+            int flags = 0;
+            if (queryOPT != null
+                && (queryOPT.getFlags() & ExtendedFlags.DO) != 0) {
+                flags = FLAG_DNSSECOK;
+            }
         }
 
         /* (non-Javadoc)
@@ -230,21 +246,6 @@ public class DnsExtd {
         }
     }
 
-    private void addAdditional(Message response, int flags) {
-        addAdditional2(response, Section.ANSWER, flags);
-        addAdditional2(response, Section.AUTHORITY, flags);
-    }
-
-    private void addAdditional2(Message response, int section, int flags) {
-        Record[] records = response.getSectionArray(section);
-        for (Record r : records) {
-            Name glueName = r.getAdditionalName();
-            if (glueName != null) {
-                addGlue(response, glueName, flags);
-            }
-        }
-    }
-
     private byte addAnswer(Message response, Name name, int type, int dclass,
                            int iterations, int flags) {
         SetResponse sr;
@@ -322,7 +323,8 @@ public class DnsExtd {
                 addRRset(name, response, rrset, Section.ANSWER, flags);
             }
             if (zone != null) {
-                addNS(response, zone, flags);
+                addRRset(zone.getNS().getName(), response, zone.getNS(),
+                         Section.AUTHORITY, flags);
                 if (iterations == 0) {
                     response.getHeader().setFlag(Flags.AA);
                 }
@@ -339,8 +341,8 @@ public class DnsExtd {
             return;
         }
         RRset nsRecords = sr.getNS();
-        Iterator<?> it = nsRecords.rrs();
-        while (it.hasNext()) {
+
+        for (Iterator<?> it = nsRecords.rrs(); it.hasNext();) {
             Record r = (Record) it.next();
             response.addRecord(r, Section.AUTHORITY);
         }
@@ -354,12 +356,6 @@ public class DnsExtd {
         addRRset(name, response, a, Section.ADDITIONAL, flags);
     }
 
-    private void addNS(Message response, Zone zone, int flags) {
-        RRset nsRecords = zone.getNS();
-        addRRset(nsRecords.getName(), response, nsRecords, Section.AUTHORITY,
-                 flags);
-    }
-
     private void addRRset(Name name, Message response, RRset rrset,
                           int section, int flags) {
         for (int s = 1; s <= section; s++) {
@@ -368,8 +364,7 @@ public class DnsExtd {
             }
         }
         if ((flags & FLAG_SIGONLY) == 0) {
-            Iterator<?> it = rrset.rrs();
-            while (it.hasNext()) {
+            for (Iterator<?> it = rrset.rrs(); it.hasNext();) {
                 Record r = (Record) it.next();
                 if (r.getName().isWild() && !name.isWild()) {
                     r = r.withName(name);
@@ -378,8 +373,7 @@ public class DnsExtd {
             }
         }
         if ((flags & (FLAG_SIGONLY | FLAG_DNSSECOK)) != 0) {
-            Iterator<?> it = rrset.sigs();
-            while (it.hasNext()) {
+            for (Iterator<?> it = rrset.sigs(); it.hasNext();) {
                 Record r = (Record) it.next();
                 if (r.getName().isWild() && !name.isWild()) {
                     r = r.withName(name);
@@ -393,7 +387,8 @@ public class DnsExtd {
         response.addRecord(zone.getSOA(), Section.AUTHORITY);
     }
 
-    private byte[] buildErrorMessage(Header header, int rcode, Record question) {
+    private List<Message> buildErrorMessage(Header header, int rcode,
+                                            Record question) {
         Message response = new Message();
         response.setHeader(header);
         for (int i = 0; i < 4; i++) {
@@ -403,48 +398,36 @@ public class DnsExtd {
             response.addRecord(question, Section.QUESTION);
         }
         header.setRcode(rcode);
-        return response.toWire();
+        return Arrays.asList(response);
     }
 
-    private byte[] doAXFR(Name name, Message query, TSIG tsig,
-                          TSIGRecord qtsig, Socket s) {
+    private List<Message> doAXFR(Name name, Message query, TSIG tsig,
+                                 TSIGRecord qtsig) {
         Zone zone = znames.get(name);
         boolean first = true;
+        List<Message> responses = new ArrayList<>();
         if (zone == null) {
             return buildErrorMessage(query.getHeader(), Rcode.REFUSED,
                                      query.getQuestion());
         }
-        Iterator<?> it = zone.AXFR();
-        try {
-            DataOutputStream dataOut;
-            dataOut = new DataOutputStream(s.getOutputStream());
-            int id = query.getHeader().getID();
-            while (it.hasNext()) {
-                RRset rrset = (RRset) it.next();
-                Message response = new Message(id);
-                Header header = response.getHeader();
-                header.setFlag(Flags.QR);
-                header.setFlag(Flags.AA);
-                addRRset(rrset.getName(), response, rrset, Section.ANSWER,
-                         FLAG_DNSSECOK);
-                if (tsig != null) {
-                    tsig.applyStream(response, qtsig, first);
-                    qtsig = response.getTSIG();
-                }
-                first = false;
-                byte[] out = response.toWire();
-                dataOut.writeShort(out.length);
-                dataOut.write(out);
+
+        int id = query.getHeader().getID();
+        for (Iterator<?> it = zone.AXFR(); it.hasNext();) {
+            RRset rrset = (RRset) it.next();
+            Message response = new Message(id);
+            Header header = response.getHeader();
+            header.setFlag(Flags.QR);
+            header.setFlag(Flags.AA);
+            addRRset(rrset.getName(), response, rrset, Section.ANSWER,
+                     FLAG_DNSSECOK);
+            if (tsig != null) {
+                tsig.applyStream(response, qtsig, first);
+                qtsig = response.getTSIG();
             }
-        } catch (IOException ex) {
-            log.warn("AXFR failed", ex);
-        } finally {
-            try {
-                s.close();
-            } catch (IOException ex) {
-            }
+            first = false;
+            responses.add(response);
         }
-        return null;
+        return responses;
     }
 
     private Zone findBestZone(Name name) {
@@ -484,7 +467,7 @@ public class DnsExtd {
         }
     }
 
-    private byte[] formerrMessage(byte[] in) {
+    private List<Message> formerrMessage(byte[] in) {
         Header header;
         try {
             header = new Header(in);
@@ -495,9 +478,9 @@ public class DnsExtd {
     }
 
     @SuppressWarnings("unused")
-    private byte[] generateReply(Message query, byte[] in, int length, Socket s)
-                                                                                throws IOException {
-        byte[] error = validateHeader(query);
+    private List<Message> generateReply(Message query, byte[] in, int length,
+                                        Socket s) throws IOException {
+        List<Message> error = validateHeader(query);
         if (error != null) {
             return error;
         }
@@ -512,18 +495,9 @@ public class DnsExtd {
             }
         }
 
+        int flags = 0;
         OPTRecord queryOPT = query.getOPT();
         if (queryOPT != null && queryOPT.getVersion() > 0) {
-        }
-
-        int maxLength;
-        int flags = 0;
-        if (s != null) {
-            maxLength = 65535;
-        } else if (queryOPT != null) {
-            maxLength = Math.max(queryOPT.getPayloadSize(), 512);
-        } else {
-            maxLength = 512;
         }
 
         if (queryOPT != null && (queryOPT.getFlags() & ExtendedFlags.DO) != 0) {
@@ -531,6 +505,7 @@ public class DnsExtd {
         }
 
         Message response = new Message(query.getHeader().getID());
+
         response.getHeader().setFlag(Flags.QR);
         if (query.getHeader().getFlag(Flags.RD)) {
             response.getHeader().setFlag(Flags.RD);
@@ -539,34 +514,44 @@ public class DnsExtd {
         Record queryRecord = query.getQuestion();
         response.addRecord(queryRecord, Section.QUESTION);
 
-        Name name = queryRecord.getName();
-        int type = queryRecord.getType();
-        int dclass = queryRecord.getDClass();
-        if (type == Type.AXFR && s != null) {
-            return doAXFR(name, query, tsig, queryTSIG, s);
+        if (queryRecord.getType() == Type.AXFR && s != null) {
+            return doAXFR(queryRecord.getName(), query, tsig, queryTSIG);
         }
-        if (!Type.isRR(type) && type != Type.ANY) {
+        if (!Type.isRR(queryRecord.getType())
+            && queryRecord.getType() != Type.ANY) {
             return buildErrorMessage(query.getHeader(), Rcode.NOTIMP,
                                      query.getQuestion());
         }
 
-        byte rcode = addAnswer(response, name, type, dclass, 0, flags);
-        if (rcode != Rcode.NOERROR && rcode != Rcode.NXDOMAIN) {
-            return buildErrorMessage(query.getHeader(), rcode,
+        byte responseCode = addAnswer(response, queryRecord.getName(),
+                                      queryRecord.getType(),
+                                      queryRecord.getDClass(), 0, flags);
+        if (responseCode != Rcode.NOERROR && responseCode != Rcode.NXDOMAIN) {
+            return buildErrorMessage(query.getHeader(), responseCode,
                                      query.getQuestion());
         }
-
-        addAdditional(response, flags);
+        response.setTSIG(tsig, Rcode.NOERROR, queryTSIG);
+        for (Record r : response.getSectionArray(Section.ANSWER)) {
+            Name glueName = r.getAdditionalName();
+            if (glueName != null) {
+                addGlue(response, glueName, flags);
+            }
+        }
+        for (Record r : response.getSectionArray(Section.AUTHORITY)) {
+            Name glueName = r.getAdditionalName();
+            if (glueName != null) {
+                addGlue(response, glueName, flags);
+            }
+        }
 
         if (queryOPT != null) {
             int optflags = flags == FLAG_DNSSECOK ? ExtendedFlags.DO : 0;
-            OPTRecord opt = new OPTRecord((short) 4096, rcode, (byte) 0,
+            OPTRecord opt = new OPTRecord((short) 4096, responseCode, (byte) 0,
                                           optflags);
             response.addRecord(opt, Section.ADDITIONAL);
         }
 
-        response.setTSIG(tsig, Rcode.NOERROR, queryTSIG);
-        return response.toWire(maxLength);
+        return Arrays.asList(response);
     }
 
     private Cache getCache(int dclass) {
@@ -583,7 +568,7 @@ public class DnsExtd {
      * @return the response message if invalid query header, or null if the
      *         query is valid
      */
-    protected byte[] validateHeader(Message query) {
+    protected List<Message> validateHeader(Message query) {
         Header header = query.getHeader();
         if (!header.getFlag(Flags.QR)) {
             if (header.getRcode() != Rcode.NOERROR) {
